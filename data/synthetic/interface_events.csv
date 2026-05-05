@@ -1,15 +1,16 @@
 timestamp,device_id,device_name,interface_name,event_type,severity,event_status
-2026-04-09 10:49:00,r1,router1,ether1,high_error_rate,high,problem
-2026-04-09 10:34:00,r1,router1,ether2,high_packet_loss,high,problem
-2026-04-09 10:58:00,r1,router1,ether2,high_error_rate,high,problem
-2026-04-09 10:02:00,r2,router2,ether1,high_error_rate,high,problem
-2026-04-09 10:20:00,r2,router2,ether2,interface_down,high,problem
-2026-04-09 10:20:00,r2,router2,ether2,high_packet_loss,critical,problem
-2026-04-09 10:21:00,r2,router2,ether2,interface_recovered,info,recovery
+2026-04-09 10:27:00,r1,router1,ether2,high_packet_loss,high,problem
+2026-04-09 10:26:00,r2,router2,ether1,high_error_rate,high,problem
+2026-04-09 10:25:00,r2,router2,ether2,interface_down,high,problem
+2026-04-09 10:25:00,r2,router2,ether2,high_packet_loss,critical,problem
+2026-04-09 10:26:00,r2,router2,ether2,interface_recovered,info,recovery
 2026-04-09 10:30:00,r2,router2,ether2,interface_down,high,problem
 2026-04-09 10:31:00,r2,router2,ether2,interface_recovered,info,recovery
-2026-04-09 10:41:00,r2,router2,ether2,high_error_rate,high,problem
-2026-04-09 10:00:00,r3,router3,ether1,high_utilization,high,problem
+2026-04-09 10:32:00,r2,router2,ether2,interface_down,high,problem
+2026-04-09 10:33:00,r2,router2,ether2,interface_recovered,info,recovery
+2026-04-09 10:34:00,r2,router2,ether2,interface_down,high,problem
+2026-04-09 10:35:00,r2,router2,ether2,interface_recovered,info,recovery
+2026-04-09 10:28:00,r3,router3,ether1,high_utilization,high,problem
+2026-04-09 10:21:00,r3,router3,ether2,high_packet_loss,high,problem
 2026-04-09 10:30:00,r3,router3,ether2,interface_down,high,problem
-2026-04-09 10:30:00,r3,router3,ether2,high_packet_loss,critical,problem
-2026-04-09 10:57:00,r3,router3,ether2,high_error_rate,high,problem
+2026-04-09 10:46:00,r3,router3,ether2,interface_recovered,info,recovery

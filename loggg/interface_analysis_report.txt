@@ -1,0 +1,27 @@
+INTERFACE ANALYSIS REPORT
+
+----------------------------------------
+Window #1
+Device: MikroTik-RB1100-01
+Model: RB1100AHx4 Dude Edition
+Interface: ether1
+Window start: 2026-04-09 10:00:00
+Window end: 2026-04-09 10:05:00
+State: degraded
+Problem type: flapping
+Matched rules: D1_MODERATE_FLAPPING, D3_ERRORS_DEGRADED
+Comment:
+Интерфейс ether1 на устройстве MikroTik-RB1100-01 нестабилен: за окно наблюдались смены состояния. Рекомендуется проверить физический линк.
+
+----------------------------------------
+Window #2
+Device: MikroTik-RB1100-01
+Model: RB1100AHx4 Dude Edition
+Interface: ether1
+Window start: 2026-04-09 10:05:00
+Window end: 2026-04-09 10:10:00
+State: degraded
+Problem type: packet_loss
+Matched rules: D2_PACKET_LOSS_DEGRADED
+Comment:
+На интерфейсе ether1 устройства MikroTik-RB1100-01 обнаружены потери пакетов. Требуется проверить качество канала, нагрузку и состояние смежного участка сети.

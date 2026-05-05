@@ -18,68 +18,20 @@ def build_time_index(
     duration_minutes: int,
     step_seconds: int,
 ) -> pd.DatetimeIndex:
+    """
+    Создаёт временную сетку для генерации метрик.
+    """
     periods = max(int((duration_minutes * 60) / step_seconds), 1)
     return pd.date_range(start=start_time, periods=periods, freq=f"{step_seconds}s")
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))
-
-
-def _jitter(rng: random.Random, base: float, rel: float = 0.05) -> float:
-    delta = abs(base) * rel
-    return max(0.0, base + rng.uniform(-delta, delta))
-
-
-def _phase_plan(total_points: int) -> dict[str, tuple[int, int]]:
-    """
-    Делит весь период на фазы:
-    - before: нормальная работа до инцидента
-    - ramp: нарастание
-    - peak: пик проблемы
-    - recovery: восстановление
-    - after: нормальная работа после
-    """
-    if total_points < 10:
-        return {
-            "before": (0, max(1, total_points // 3)),
-            "ramp": (max(1, total_points // 3), max(2, total_points // 2)),
-            "peak": (max(2, total_points // 2), max(3, total_points // 2 + 1)),
-            "recovery": (max(3, total_points // 2 + 1), max(4, total_points - 1)),
-            "after": (max(4, total_points - 1), total_points),
-        }
-
-    before_end = int(total_points * 0.35)
-    ramp_end = int(total_points * 0.50)
-    peak_end = int(total_points * 0.70)
-    recovery_end = int(total_points * 0.85)
-
-    return {
-        "before": (0, before_end),
-        "ramp": (before_end, ramp_end),
-        "peak": (ramp_end, peak_end),
-        "recovery": (peak_end, recovery_end),
-        "after": (recovery_end, total_points),
-    }
-
-
-def _phase_name(index: int, plan: dict[str, tuple[int, int]]) -> str:
-    for phase, (start, end) in plan.items():
-        if start <= index < end:
-            return phase
-    return "after"
-
-
-def _phase_progress(index: int, start: int, end: int) -> float:
-    if end <= start + 1:
-        return 1.0
-    return (index - start) / float(end - start - 1)
 
 
 def generate_device_context_rows(
     device_config: dict[str, Any],
     interfaces_config: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    """
+    Генерирует строки для device_context.csv.
+    """
     rows: list[dict[str, Any]] = []
 
     for iface in interfaces_config:
@@ -100,6 +52,15 @@ def generate_device_context_rows(
     return rows
 
 
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
+
+
+def _normal_jitter(rng: random.Random, base: float, rel: float = 0.05) -> float:
+    delta = base * rel
+    return max(0.0, base + rng.uniform(-delta, delta))
+
+
 def generate_normal_metrics_series(
     device_config: dict[str, Any],
     interface_config: dict[str, Any],
@@ -108,8 +69,7 @@ def generate_normal_metrics_series(
     rng: random.Random,
 ) -> list[dict[str, Any]]:
     """
-    Базовая нормальная телеметрия.
-    Здесь не должно быть выраженных проблем.
+    Генерирует базовую нормальную телеметрию для интерфейса.
     """
     rows: list[dict[str, Any]] = []
 
@@ -117,8 +77,8 @@ def generate_normal_metrics_series(
     out_errors = 0
     in_discards = 0
     out_discards = 0
-
     uptime_start = int(device_config.get("device_uptime_start_sec", 864000))
+
     base_in = float(interface_config.get("base_in_traffic_bps", 120_000_000))
     base_out = float(interface_config.get("base_out_traffic_bps", 60_000_000))
     base_latency = float(interface_config.get("base_latency_ms", 8.0))
@@ -126,6 +86,19 @@ def generate_normal_metrics_series(
     base_memory = float(device_config.get("base_memory_pct", 45.0))
 
     for i, ts in enumerate(time_index):
+        in_traffic = _normal_jitter(rng, base_in, rel=0.10)
+        out_traffic = _normal_jitter(rng, base_out, rel=0.10)
+        latency = _normal_jitter(rng, base_latency, rel=0.15)
+        packet_loss = rng.choice([0.0, 0.0, 0.0, 0.1, 0.2])
+        cpu = _normal_jitter(rng, base_cpu, rel=0.08)
+        memory = _normal_jitter(rng, base_memory, rel=0.05)
+
+        # В норме счётчики могут расти очень медленно или не расти вовсе.
+        in_errors += rng.choice([0, 0, 0, 1])
+        out_errors += rng.choice([0, 0, 0, 1])
+        in_discards += rng.choice([0, 0, 0, 1])
+        out_discards += rng.choice([0, 0, 0, 1])
+
         rows.append(
             {
                 "timestamp": ts,
@@ -135,16 +108,16 @@ def generate_normal_metrics_series(
                 "interface_index": interface_config["interface_index"],
                 "oper_status": "up",
                 "admin_status": "up",
-                "in_traffic_bps": round(_jitter(rng, base_in, rel=0.08), 2),
-                "out_traffic_bps": round(_jitter(rng, base_out, rel=0.08), 2),
+                "in_traffic_bps": round(in_traffic, 2),
+                "out_traffic_bps": round(out_traffic, 2),
                 "in_errors": in_errors,
                 "out_errors": out_errors,
                 "in_discards": in_discards,
                 "out_discards": out_discards,
-                "packet_loss_pct": 0.0,
-                "latency_ms": round(_jitter(rng, base_latency, rel=0.12), 2),
-                "device_cpu_pct": round(_jitter(rng, base_cpu, rel=0.08), 2),
-                "device_memory_pct": round(_jitter(rng, base_memory, rel=0.05), 2),
+                "packet_loss_pct": round(packet_loss, 2),
+                "latency_ms": round(latency, 2),
+                "device_cpu_pct": round(cpu, 2),
+                "device_memory_pct": round(memory, 2),
                 "device_availability": "true",
                 "device_uptime_sec": uptime_start + i * step_seconds,
             }
@@ -153,242 +126,117 @@ def generate_normal_metrics_series(
     return rows
 
 
-def apply_normal_noisy_scenario(
-    metrics_rows: list[dict[str, Any]],
-    rng: random.Random,
-) -> list[dict[str, Any]]:
-    """
-    Реалистичная нормальная работа с лёгким шумом, не переходящим в warning.
-    """
-    for row in metrics_rows:
-        row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(0.0, 1.5), 2)
-        row["device_cpu_pct"] = round(_clamp(float(row["device_cpu_pct"]) + rng.uniform(-1.0, 2.0), 0, 100), 2)
-        row["device_memory_pct"] = round(_clamp(float(row["device_memory_pct"]) + rng.uniform(-1.0, 1.5), 0, 100), 2)
-        row["packet_loss_pct"] = 0.0
-    return metrics_rows
-
-
-def apply_high_utilization_incident(
+def apply_high_utilization_scenario(
     metrics_rows: list[dict[str, Any]],
     interface_config: dict[str, Any],
     rng: random.Random,
 ) -> list[dict[str, Any]]:
+    """
+    Поднимает трафик до зоны высокой утилизации.
+    """
     capacity_bps = float(interface_config["interface_speed_mbps"]) * 1_000_000
-    plan = _phase_plan(len(metrics_rows))
+    target_in = capacity_bps * rng.uniform(0.78, 0.92)
+    target_out = capacity_bps * rng.uniform(0.55, 0.80)
 
-    for i, row in enumerate(metrics_rows):
-        phase = _phase_name(i, plan)
-
-        if phase == "before" or phase == "after":
-            continue
-
-        if phase == "ramp":
-            start, end = plan["ramp"]
-            k = _phase_progress(i, start, end)
-            target_in = capacity_bps * (0.45 + 0.35 * k)
-            target_out = capacity_bps * (0.25 + 0.25 * k)
-            row["in_traffic_bps"] = round(_jitter(rng, target_in, rel=0.03), 2)
-            row["out_traffic_bps"] = round(_jitter(rng, target_out, rel=0.03), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + 3 + 12 * k, 2)
-            row["device_cpu_pct"] = round(_clamp(float(row["device_cpu_pct"]) + 5 + 10 * k, 0, 100), 2)
-
-        elif phase == "peak":
-            target_in = capacity_bps * rng.uniform(0.82, 0.94)
-            target_out = capacity_bps * rng.uniform(0.55, 0.80)
-            row["in_traffic_bps"] = round(_jitter(rng, target_in, rel=0.02), 2)
-            row["out_traffic_bps"] = round(_jitter(rng, target_out, rel=0.02), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(12, 30), 2)
-            row["device_cpu_pct"] = round(_clamp(float(row["device_cpu_pct"]) + rng.uniform(12, 22), 0, 100), 2)
-
-        elif phase == "recovery":
-            start, end = plan["recovery"]
-            k = 1.0 - _phase_progress(i, start, end)
-            target_in = capacity_bps * (0.45 + 0.30 * k)
-            target_out = capacity_bps * (0.20 + 0.20 * k)
-            row["in_traffic_bps"] = round(_jitter(rng, target_in, rel=0.03), 2)
-            row["out_traffic_bps"] = round(_jitter(rng, target_out, rel=0.03), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + 4 + 10 * k, 2)
-            row["device_cpu_pct"] = round(_clamp(float(row["device_cpu_pct"]) + 4 + 8 * k, 0, 100), 2)
+    for row in metrics_rows:
+        row["in_traffic_bps"] = round(_normal_jitter(rng, target_in, rel=0.03), 2)
+        row["out_traffic_bps"] = round(_normal_jitter(rng, target_out, rel=0.04), 2)
+        row["latency_ms"] = round(row["latency_ms"] + rng.uniform(5, 20), 2)
+        row["device_cpu_pct"] = round(_clamp(float(row["device_cpu_pct"]) + rng.uniform(8, 18), 0, 100), 2)
 
     return metrics_rows
 
 
-def apply_packet_loss_incident(
+def apply_packet_loss_scenario(
     metrics_rows: list[dict[str, Any]],
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    plan = _phase_plan(len(metrics_rows))
+    """
+    Вносит деградацию по потерям и задержке.
+    """
+    n = len(metrics_rows)
+    start_idx = max(n // 3, 0)
 
     for i, row in enumerate(metrics_rows):
-        phase = _phase_name(i, plan)
-
-        if phase == "before" or phase == "after":
-            row["packet_loss_pct"] = 0.0
-            continue
-
-        if phase == "ramp":
-            start, end = plan["ramp"]
-            k = _phase_progress(i, start, end)
-            row["packet_loss_pct"] = round(0.5 + 5.0 * k + rng.uniform(0.0, 1.0), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + 4 + 12 * k, 2)
-
-        elif phase == "peak":
-            row["packet_loss_pct"] = round(rng.uniform(6.0, 15.0), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(12, 35), 2)
-
-        elif phase == "recovery":
-            start, end = plan["recovery"]
-            k = 1.0 - _phase_progress(i, start, end)
-            row["packet_loss_pct"] = round(max(0.0, 1.0 + 6.0 * k + rng.uniform(0.0, 0.8)), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + 3 + 10 * k, 2)
+        if i >= start_idx:
+            growth = (i - start_idx + 1) / max(n - start_idx, 1)
+            row["packet_loss_pct"] = round(rng.uniform(3.0, 12.0) * growth + rng.uniform(1.0, 4.0), 2)
+            row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(10, 35), 2)
 
     return metrics_rows
 
 
-def apply_interface_errors_incident(
+def apply_interface_errors_scenario(
     metrics_rows: list[dict[str, Any]],
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    plan = _phase_plan(len(metrics_rows))
+    """
+    Вносит рост ошибок и discards.
+    """
+    in_errors_counter = 0
+    out_errors_counter = 0
+    in_discards_counter = 0
+    out_discards_counter = 0
 
-    in_errors = 0
-    out_errors = 0
-    in_discards = 0
-    out_discards = 0
+    for row in metrics_rows:
+        in_errors_counter += rng.randint(3, 12)
+        out_errors_counter += rng.randint(0, 4)
+        in_discards_counter += rng.randint(1, 8)
+        out_discards_counter += rng.randint(0, 3)
 
-    for i, row in enumerate(metrics_rows):
-        phase = _phase_name(i, plan)
-
-        if phase == "before" or phase == "after":
-            add_in_err = rng.choice([0, 0, 1])
-            add_out_err = rng.choice([0, 0, 0, 1])
-            add_in_dis = rng.choice([0, 0, 1])
-            add_out_dis = rng.choice([0, 0, 0, 1])
-
-        elif phase == "ramp":
-            start, end = plan["ramp"]
-            k = _phase_progress(i, start, end)
-            add_in_err = int(1 + 4 * k + rng.randint(0, 2))
-            add_out_err = int(rng.randint(0, 2))
-            add_in_dis = int(1 + 3 * k + rng.randint(0, 1))
-            add_out_dis = int(rng.randint(0, 1))
-            row["latency_ms"] = round(float(row["latency_ms"]) + 2 + 5 * k, 2)
-            row["packet_loss_pct"] = round(0.5 + 1.5 * k + rng.uniform(0.0, 0.8), 2)
-
-        elif phase == "peak":
-            add_in_err = rng.randint(8, 15)
-            add_out_err = rng.randint(1, 4)
-            add_in_dis = rng.randint(4, 10)
-            add_out_dis = rng.randint(1, 3)
-            row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(6, 18), 2)
-            row["packet_loss_pct"] = round(rng.uniform(1.5, 5.0), 2)
-
-        elif phase == "recovery":
-            start, end = plan["recovery"]
-            k = 1.0 - _phase_progress(i, start, end)
-            add_in_err = int(1 + 5 * k + rng.randint(0, 1))
-            add_out_err = int(rng.randint(0, 2))
-            add_in_dis = int(1 + 3 * k + rng.randint(0, 1))
-            add_out_dis = int(rng.randint(0, 1))
-            row["latency_ms"] = round(float(row["latency_ms"]) + 1 + 4 * k, 2)
-            row["packet_loss_pct"] = round(max(0.0, 0.3 + 1.5 * k + rng.uniform(0.0, 0.5)), 2)
-
-        else:
-            add_in_err = 0
-            add_out_err = 0
-            add_in_dis = 0
-            add_out_dis = 0
-
-        in_errors += add_in_err
-        out_errors += add_out_err
-        in_discards += add_in_dis
-        out_discards += add_out_dis
-
-        row["in_errors"] = in_errors
-        row["out_errors"] = out_errors
-        row["in_discards"] = in_discards
-        row["out_discards"] = out_discards
+        row["in_errors"] = in_errors_counter
+        row["out_errors"] = out_errors_counter
+        row["in_discards"] = in_discards_counter
+        row["out_discards"] = out_discards_counter
+        row["packet_loss_pct"] = round(float(row["packet_loss_pct"]) + rng.uniform(0.5, 2.5), 2)
+        row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(2, 10), 2)
 
     return metrics_rows
 
 
-def apply_flapping_incident(
+def apply_flapping_scenario(
     metrics_rows: list[dict[str, Any]],
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    plan = _phase_plan(len(metrics_rows))
+    """
+    Вносит нестабильность статуса интерфейса.
+    """
+    n = len(metrics_rows)
+    if n < 4:
+        return metrics_rows
 
-    ramp_start, ramp_end = plan["ramp"]
-    peak_start, peak_end = plan["peak"]
+    flap_points = sorted(set([
+        max(1, n // 3),
+        max(2, n // 2),
+    ]))
 
-    flap_indexes = set()
-
-    if ramp_end > ramp_start:
-        flap_indexes.add(ramp_start + max(0, (ramp_end - ramp_start) // 2))
-
-    if peak_end > peak_start:
-        flap_indexes.add(peak_start)
-        flap_indexes.add(min(peak_start + 2, peak_end - 1))
-        flap_indexes.add(min(peak_start + 4, peak_end - 1))
-
-    for i, row in enumerate(metrics_rows):
-        phase = _phase_name(i, plan)
-
-        if i in flap_indexes:
-            row["oper_status"] = "down"
-            row["in_traffic_bps"] = 0.0
-            row["out_traffic_bps"] = 0.0
-            row["packet_loss_pct"] = round(rng.uniform(25.0, 70.0), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(25, 90), 2)
-        elif phase in ("ramp", "peak", "recovery"):
-            row["packet_loss_pct"] = round(max(float(row["packet_loss_pct"]), rng.uniform(1.0, 4.5)), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(3, 15), 2)
+    for idx in flap_points:
+        if idx < n:
+            metrics_rows[idx]["oper_status"] = "down"
+            metrics_rows[idx]["in_traffic_bps"] = 0.0
+            metrics_rows[idx]["out_traffic_bps"] = 0.0
+            metrics_rows[idx]["packet_loss_pct"] = round(rng.uniform(20.0, 60.0), 2)
+            metrics_rows[idx]["latency_ms"] = round(float(metrics_rows[idx]["latency_ms"]) + rng.uniform(30, 90), 2)
 
     return metrics_rows
 
 
-def apply_down_incident(
+def apply_down_scenario(
     metrics_rows: list[dict[str, Any]],
     rng: random.Random,
 ) -> list[dict[str, Any]]:
-    plan = _phase_plan(len(metrics_rows))
+    """
+    Вносит длительное состояние down в конце окна.
+    """
+    n = len(metrics_rows)
+    start_idx = max(n // 2, 0)
 
-    for i, row in enumerate(metrics_rows):
-        phase = _phase_name(i, plan)
-
-        if phase == "before" or phase == "after":
-            continue
-
-        if phase == "ramp":
-            start, end = plan["ramp"]
-            k = _phase_progress(i, start, end)
-            row["packet_loss_pct"] = round(5 + 20 * k + rng.uniform(0.0, 3.0), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + 8 + 18 * k, 2)
-            row["in_traffic_bps"] = round(float(row["in_traffic_bps"]) * (1.0 - 0.5 * k), 2)
-            row["out_traffic_bps"] = round(float(row["out_traffic_bps"]) * (1.0 - 0.5 * k), 2)
-
-        elif phase == "peak":
-            row["oper_status"] = "down"
-            row["in_traffic_bps"] = 0.0
-            row["out_traffic_bps"] = 0.0
-            row["packet_loss_pct"] = round(rng.uniform(80.0, 100.0), 2)
-            row["latency_ms"] = round(float(row["latency_ms"]) + rng.uniform(40, 120), 2)
-
-        elif phase == "recovery":
-            start, end = plan["recovery"]
-            k = 1.0 - _phase_progress(i, start, end)
-            if k > 0.5:
-                row["oper_status"] = "down"
-                row["in_traffic_bps"] = 0.0
-                row["out_traffic_bps"] = 0.0
-                row["packet_loss_pct"] = round(rng.uniform(30.0, 80.0), 2)
-            else:
-                row["oper_status"] = "up"
-                row["in_traffic_bps"] = round(float(row["in_traffic_bps"]) * (0.5 + 0.7 * (1 - k)), 2)
-                row["out_traffic_bps"] = round(float(row["out_traffic_bps"]) * (0.5 + 0.7 * (1 - k)), 2)
-                row["packet_loss_pct"] = round(max(0.0, 2.0 + 10.0 * k + rng.uniform(0.0, 2.0)), 2)
-
-            row["latency_ms"] = round(float(row["latency_ms"]) + 10 + 25 * k, 2)
+    for i in range(start_idx, n):
+        metrics_rows[i]["oper_status"] = "down"
+        metrics_rows[i]["in_traffic_bps"] = 0.0
+        metrics_rows[i]["out_traffic_bps"] = 0.0
+        metrics_rows[i]["packet_loss_pct"] = round(rng.uniform(40.0, 100.0), 2)
+        metrics_rows[i]["latency_ms"] = round(float(metrics_rows[i]["latency_ms"]) + rng.uniform(40, 120), 2)
 
     return metrics_rows
 
@@ -399,45 +247,44 @@ def apply_scenario(
     scenario_name: str,
     rng: random.Random,
 ) -> list[dict[str, Any]]:
+    """
+    Применяет выбранный сценарий к базовой серии.
+    """
     scenario = scenario_name.strip().lower()
 
-    if scenario in {"normal", "normal_clean"}:
+    if scenario == "normal":
         return metrics_rows
-
-    if scenario == "normal_noisy":
-        return apply_normal_noisy_scenario(metrics_rows, rng)
-
     if scenario == "high_utilization":
-        return apply_high_utilization_incident(metrics_rows, interface_config, rng)
-
+        return apply_high_utilization_scenario(metrics_rows, interface_config, rng)
     if scenario == "packet_loss":
-        return apply_packet_loss_incident(metrics_rows, rng)
-
+        return apply_packet_loss_scenario(metrics_rows, rng)
     if scenario == "interface_errors":
-        return apply_interface_errors_incident(metrics_rows, rng)
-
+        return apply_interface_errors_scenario(metrics_rows, rng)
     if scenario == "flapping":
-        return apply_flapping_incident(metrics_rows, rng)
-
+        return apply_flapping_scenario(metrics_rows, rng)
     if scenario == "down":
-        return apply_down_incident(metrics_rows, rng)
+        return apply_down_scenario(metrics_rows, rng)
 
     raise ValueError(f"Неизвестный сценарий: {scenario_name}")
 
 
 def generate_events_from_metrics(
     metrics_rows: list[dict[str, Any]],
+    scenario_name: str,
 ) -> list[dict[str, Any]]:
+    """
+    Строит события по уже сгенерированным метрикам и сценарию.
+    """
     if not metrics_rows:
         return []
 
     events: list[dict[str, Any]] = []
-
     device_id = metrics_rows[0]["device_id"]
     device_name = metrics_rows[0]["device_name"]
     interface_name = metrics_rows[0]["interface_name"]
+    interface_capacity_bps = 1_000_000_000
 
-    previous_status = str(metrics_rows[0]["oper_status"]).lower()
+    previous_status = None
     high_loss_emitted = False
     high_util_emitted = False
     high_errors_emitted = False
@@ -445,6 +292,9 @@ def generate_events_from_metrics(
     for row in metrics_rows:
         timestamp = row["timestamp"]
         current_status = str(row["oper_status"]).lower()
+
+        if previous_status is None:
+            previous_status = current_status
 
         if previous_status == "up" and current_status == "down":
             events.append(
@@ -486,8 +336,11 @@ def generate_events_from_metrics(
             )
             high_loss_emitted = True
 
-        capacity_bps = 1_000_000_000.0
-        if float(row["in_traffic_bps"]) >= 0.75 * capacity_bps and not high_util_emitted:
+        if (
+            float(row["in_traffic_bps"]) > 0
+            and float(row["in_traffic_bps"]) >= 0.75 * interface_capacity_bps
+            and not high_util_emitted
+        ):
             events.append(
                 {
                     "timestamp": timestamp,
@@ -517,6 +370,7 @@ def generate_events_from_metrics(
 
         previous_status = current_status
 
+    _ = scenario_name
     return events
 
 
@@ -529,6 +383,9 @@ def generate_interface_dataset(
     step_seconds: int,
     rng: random.Random,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Генерирует метрики и события по одному интерфейсу.
+    """
     time_index = build_time_index(
         start_time=start_time,
         duration_minutes=duration_minutes,
@@ -542,15 +399,17 @@ def generate_interface_dataset(
         step_seconds=step_seconds,
         rng=rng,
     )
-
     metrics_rows = apply_scenario(
         metrics_rows=metrics_rows,
         interface_config=interface_config,
         scenario_name=scenario_name,
         rng=rng,
     )
+    event_rows = generate_events_from_metrics(
+        metrics_rows=metrics_rows,
+        scenario_name=scenario_name,
+    )
 
-    event_rows = generate_events_from_metrics(metrics_rows)
     return metrics_rows, event_rows
 
 
@@ -562,6 +421,12 @@ def generate_synthetic_csv_bundle(
     step_seconds: int,
     random_seed: int = 42,
 ) -> dict[str, Path]:
+    """
+    Генерирует полный комплект CSV:
+    - device_context.csv
+    - interface_metrics.csv
+    - interface_events.csv
+    """
     rng = random.Random(random_seed)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -602,12 +467,12 @@ def generate_synthetic_csv_bundle(
     metrics_df = pd.DataFrame(all_metrics_rows)
     events_df = pd.DataFrame(all_event_rows)
 
-    if not context_df.empty:
-        context_df = context_df.sort_values(["device_id", "interface_index"]).reset_index(drop=True)
     if not metrics_df.empty:
         metrics_df = metrics_df.sort_values(["device_id", "interface_name", "timestamp"]).reset_index(drop=True)
     if not events_df.empty:
         events_df = events_df.sort_values(["device_id", "interface_name", "timestamp"]).reset_index(drop=True)
+    if not context_df.empty:
+        context_df = context_df.sort_values(["device_id", "interface_index"]).reset_index(drop=True)
 
     context_path = output_path / "device_context.csv"
     metrics_path = output_path / "interface_metrics.csv"
@@ -625,6 +490,12 @@ def generate_synthetic_csv_bundle(
 
 
 def build_default_devices_config() -> list[dict[str, Any]]:
+    """
+    Стартовая конфигурация синтетического стенда.
+    Имена устройств шаблонные:
+    - device_id: r1, r2, ...
+    - device_name: router1, router2, ...
+    """
     return [
         {
             "device_id": "r1",
@@ -638,10 +509,9 @@ def build_default_devices_config() -> list[dict[str, Any]]:
                     "interface_role": "WAN",
                     "interface_speed_mbps": 1000,
                     "neighbor_device": "isp1",
-                    "scenario_name": "normal_noisy",
+                    "scenario_name": "normal",
                     "base_in_traffic_bps": 180_000_000,
                     "base_out_traffic_bps": 90_000_000,
-                    "base_latency_ms": 8.0,
                 },
                 {
                     "interface_name": "ether2",
@@ -652,7 +522,6 @@ def build_default_devices_config() -> list[dict[str, Any]]:
                     "scenario_name": "packet_loss",
                     "base_in_traffic_bps": 220_000_000,
                     "base_out_traffic_bps": 100_000_000,
-                    "base_latency_ms": 9.0,
                 },
             ],
         },
@@ -671,7 +540,6 @@ def build_default_devices_config() -> list[dict[str, Any]]:
                     "scenario_name": "interface_errors",
                     "base_in_traffic_bps": 140_000_000,
                     "base_out_traffic_bps": 70_000_000,
-                    "base_latency_ms": 7.0,
                 },
                 {
                     "interface_name": "ether2",
@@ -682,7 +550,6 @@ def build_default_devices_config() -> list[dict[str, Any]]:
                     "scenario_name": "flapping",
                     "base_in_traffic_bps": 90_000_000,
                     "base_out_traffic_bps": 45_000_000,
-                    "base_latency_ms": 8.0,
                 },
             ],
         },
@@ -701,7 +568,6 @@ def build_default_devices_config() -> list[dict[str, Any]]:
                     "scenario_name": "high_utilization",
                     "base_in_traffic_bps": 300_000_000,
                     "base_out_traffic_bps": 180_000_000,
-                    "base_latency_ms": 9.0,
                 },
                 {
                     "interface_name": "ether2",
@@ -712,7 +578,6 @@ def build_default_devices_config() -> list[dict[str, Any]]:
                     "scenario_name": "down",
                     "base_in_traffic_bps": 110_000_000,
                     "base_out_traffic_bps": 60_000_000,
-                    "base_latency_ms": 8.0,
                 },
             ],
         },
@@ -747,7 +612,7 @@ def main() -> None:
 
     print("\nFiles are saved in data/synthetic/")
     print("They are format-compatible with the main project input.")
-    print("If needed, copy them manually into data/raw/.")
+    print("If needed, copy them manually into data/raw/ before running the main pipeline.")
 
 
 if __name__ == "__main__":

@@ -1,37 +1,134 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 from src.data.loaders import load_all_input_tables
-from src.features.interface_features import (
-    build_interface_window,
-    build_interface_windows_dataset,
-)
-from src.models.baseline import (
-    evaluate_interface_window,
-    evaluate_interface_windows_dataset,
-)
+from src.features.interface_features import build_interface_windows_dataset
+from src.models.baseline import evaluate_interface_windows_dataset
 
 
 METRICS_PATH = Path("data/raw/interface_metrics.csv")
 EVENTS_PATH = Path("data/raw/interface_events.csv")
 CONTEXT_PATH = Path("data/raw/device_context.csv")
 
-DEFAULT_DEVICE_ID = "mt-rb1100-01"
-DEFAULT_INTERFACE_NAME = "ether1"
-
 REPORT_PATH = Path("artifacts/interface_analysis_report.txt")
+
+# Размер окна анализа для этапа 1
+WINDOW_SIZE_MINUTES = 5
+
+
+def get_available_targets(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Возвращает все доступные уникальные пары device_id + interface_name,
+    которые можно анализировать.
+    """
+    required_cols = {"device_id", "interface_name"}
+    missing = required_cols - set(metrics_df.columns)
+    if missing:
+        raise ValueError(
+            f"В metrics_df отсутствуют обязательные колонки: {sorted(missing)}"
+        )
+
+    targets_df = (
+        metrics_df[["device_id", "interface_name"]]
+        .dropna()
+        .drop_duplicates()
+        .sort_values(["device_id", "interface_name"])
+        .reset_index(drop=True)
+    )
+
+    return targets_df
+
+
+def build_windows_spec_for_target(
+    metrics_df: pd.DataFrame,
+    device_id: str,
+    interface_name: str,
+    window_size_minutes: int,
+) -> list[dict[str, Any]]:
+    """
+    Строит список окон для одной пары device_id + interface_name.
+    """
+    interface_df = metrics_df.loc[
+        (metrics_df["device_id"].astype("string") == str(device_id))
+        & (metrics_df["interface_name"].astype("string") == str(interface_name))
+    ].copy()
+
+    if interface_df.empty:
+        return []
+
+    interface_df["timestamp"] = pd.to_datetime(interface_df["timestamp"], errors="coerce")
+    interface_df = interface_df.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+    if interface_df.empty:
+        return []
+
+    min_ts = interface_df["timestamp"].min()
+    max_ts = interface_df["timestamp"].max()
+
+    if pd.isna(min_ts) or pd.isna(max_ts):
+        return []
+
+    window_delta = pd.Timedelta(minutes=window_size_minutes)
+
+    windows_spec: list[dict[str, Any]] = []
+    current_start = min_ts
+
+    # Добавляем небольшую дельту, чтобы последнее окно тоже попало в цикл
+    while current_start <= max_ts:
+        current_end = current_start + window_delta
+
+        windows_spec.append(
+            {
+                "device_id": str(device_id),
+                "interface_name": str(interface_name),
+                "window_start": current_start,
+                "window_end": current_end,
+            }
+        )
+
+        current_start = current_end
+
+    return windows_spec
+
+
+def build_windows_spec_for_all_targets(
+    metrics_df: pd.DataFrame,
+    window_size_minutes: int,
+) -> list[dict[str, Any]]:
+    """
+    Строит список окон для всех доступных интерфейсов.
+    """
+    targets_df = get_available_targets(metrics_df)
+
+    all_windows_spec: list[dict[str, Any]] = []
+
+    for _, row in targets_df.iterrows():
+        device_id = str(row["device_id"])
+        interface_name = str(row["interface_name"])
+
+        target_windows = build_windows_spec_for_target(
+            metrics_df=metrics_df,
+            device_id=device_id,
+            interface_name=interface_name,
+            window_size_minutes=window_size_minutes,
+        )
+
+        all_windows_spec.extend(target_windows)
+
+    return all_windows_spec
 
 
 def save_txt_report(
-    results: list[dict],
-    windows: list[dict],
+    results: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
     output_path: str | Path,
 ) -> None:
     """
-    Сохраняет простой текстовый отчёт по результатам анализа.
+    Сохраняет простой текстовый отчёт по результатам анализа этапа 1.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,9 +137,15 @@ def save_txt_report(
     lines.append("INTERFACE ANALYSIS REPORT")
     lines.append("")
 
+    if not windows or not results:
+        lines.append("No analysis results available.")
+        output_path.write_text("\n".join(lines), encoding="utf-8")
+        return
+
     for i, (window, result) in enumerate(zip(windows, results), start=1):
-        lines.append("-" * 40)
+        lines.append("-" * 50)
         lines.append(f"Window #{i}")
+        lines.append(f"Device ID: {window.get('device_id')}")
         lines.append(f"Device: {window.get('device_name')}")
         lines.append(f"Model: {window.get('device_model')}")
         lines.append(f"Interface: {window.get('interface_name')}")
@@ -58,62 +161,75 @@ def save_txt_report(
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_single_window_demo(
-    metrics_df: pd.DataFrame,
-    events_df: pd.DataFrame,
-    context_df: pd.DataFrame,
-) -> tuple[dict, dict]:
+def print_console_summary(
+    windows_df: pd.DataFrame,
+    results: list[dict[str, Any]],
+) -> None:
     """
-    Демонстрация для одного окна.
+    Печатает краткую сводку по результатам анализа.
     """
-    window_start = pd.Timestamp("2026-04-09 10:00:00")
-    window_end = pd.Timestamp("2026-04-09 10:10:00")
+    if windows_df.empty or not results:
+        print("Анализ не выполнен: окна не были сформированы.")
+        return
 
-    interface_window = build_interface_window(
-        metrics_df=metrics_df,
-        events_df=events_df,
-        context_df=context_df,
-        device_id=DEFAULT_DEVICE_ID,
-        interface_name=DEFAULT_INTERFACE_NAME,
-        window_start=window_start,
-        window_end=window_end,
+    results_df = pd.DataFrame(results)
+
+    unique_targets = (
+        windows_df[["device_id", "interface_name"]]
+        .drop_duplicates()
+        .shape[0]
     )
 
-    baseline_result = evaluate_interface_window(interface_window)
+    print("=== ANALYSIS SUMMARY ===")
+    print(f"Targets analyzed: {unique_targets}")
+    print(f"Windows analyzed: {len(windows_df)}")
 
-    print("=== SINGLE INTERFACE WINDOW ===")
-    for key, value in interface_window.items():
-        print(f"{key}: {value}")
+    if "state_label" in results_df.columns:
+        print("\nState distribution:")
+        print(results_df["state_label"].value_counts(dropna=False))
 
-    print("\n=== SINGLE BASELINE RESULT ===")
-    for key, value in baseline_result.items():
-        print(f"{key}: {value}")
-
-    return interface_window, baseline_result
+    if "problem_type_label" in results_df.columns:
+        print("\nProblem type distribution:")
+        print(results_df["problem_type_label"].value_counts(dropna=False))
 
 
-def run_multi_window_demo(
-    metrics_df: pd.DataFrame,
-    events_df: pd.DataFrame,
-    context_df: pd.DataFrame,
-) -> tuple[pd.DataFrame, list[dict]]:
+def main() -> None:
     """
-    Демонстрация для нескольких окон подряд.
+    Универсальная точка входа для этапа 1.
+
+    Алгоритм:
+    1. Загружаем и нормализуем подготовленные данные.
+    2. Находим все доступные device_id + interface_name.
+    3. Формируем окна по каждому интерфейсу.
+    4. Собираем dataset из interface_window.
+    5. Применяем baseline-анализ.
+    6. Сохраняем txt-отчёт.
+    7. Печатаем краткую сводку в консоль.
     """
-    windows_spec = [
-        {
-            "device_id": DEFAULT_DEVICE_ID,
-            "interface_name": DEFAULT_INTERFACE_NAME,
-            "window_start": "2026-04-09 10:00:00",
-            "window_end": "2026-04-09 10:05:00",
-        },
-        {
-            "device_id": DEFAULT_DEVICE_ID,
-            "interface_name": DEFAULT_INTERFACE_NAME,
-            "window_start": "2026-04-09 10:05:00",
-            "window_end": "2026-04-09 10:10:00",
-        },
-    ]
+    metrics_df, events_df, context_df = load_all_input_tables(
+        metrics_path=METRICS_PATH,
+        events_path=EVENTS_PATH,
+        context_path=CONTEXT_PATH,
+    )
+
+    targets_df = get_available_targets(metrics_df)
+
+    if targets_df.empty:
+        print("Во входных данных не найдено ни одной пары device_id + interface_name.")
+        return
+
+    print("=== AVAILABLE TARGETS ===")
+    print(targets_df.to_string(index=False))
+
+    windows_spec = build_windows_spec_for_all_targets(
+        metrics_df=metrics_df,
+        window_size_minutes=WINDOW_SIZE_MINUTES,
+    )
+
+    if not windows_spec:
+        print("Не удалось сформировать окна анализа.")
+        print("Проверь наличие корректных timestamp и данных в metrics.")
+        return
 
     windows_df = build_interface_windows_dataset(
         metrics_df=metrics_df,
@@ -122,54 +238,25 @@ def run_multi_window_demo(
         windows_spec=windows_spec,
     )
 
+    if windows_df.empty:
+        print("Не удалось собрать dataset из interface_window.")
+        return
+
     baseline_results = evaluate_interface_windows_dataset(windows_df)
-
-    print("\n=== MULTI WINDOW DATASET ===")
-    print(
-        windows_df[
-            [
-                "record_id",
-                "device_id",
-                "interface_name",
-                "window_start",
-                "window_end",
-                "status_change_count",
-                "errors_total_delta",
-                "packet_loss_avg_pct",
-                "latency_avg_ms",
-            ]
-        ]
-    )
-
-    print("\n=== MULTI WINDOW BASELINE RESULTS ===")
-    print(pd.DataFrame(baseline_results))
-
-    return windows_df, baseline_results
-
-
-def main() -> None:
-    metrics_df, events_df, context_df = load_all_input_tables(
-        metrics_path=METRICS_PATH,
-        events_path=EVENTS_PATH,
-        context_path=CONTEXT_PATH,
-    )
-
-    # Одиночный прогон оставляем для наглядной проверки.
-    run_single_window_demo(metrics_df, events_df, context_df)
-
-    # Основной результат для отчёта — набор окон.
-    windows_df, baseline_results = run_multi_window_demo(
-        metrics_df, events_df, context_df
-    )
-
     windows_records = windows_df.to_dict(orient="records")
+
     save_txt_report(
         results=baseline_results,
         windows=windows_records,
         output_path=REPORT_PATH,
     )
 
-    print(f"\n=== TXT REPORT SAVED ===")
+    print_console_summary(
+        windows_df=windows_df,
+        results=baseline_results,
+    )
+
+    print("\n=== REPORT SAVED ===")
     print(REPORT_PATH)
 
 

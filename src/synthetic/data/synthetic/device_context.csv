@@ -1,7 +1,0 @@
-device_id,device_name,device_vendor,device_model,interface_name,interface_index,interface_role,interface_speed_mbps,neighbor_device
-r1,router1,MikroTik,RB1100AHx4 Dude Edition,ether1,1,WAN,1000,isp1
-r1,router1,MikroTik,RB1100AHx4 Dude Edition,ether2,2,uplink,1000,router2
-r2,router2,MikroTik,RB1100AHx4 Dude Edition,ether1,1,WAN,1000,router1
-r2,router2,MikroTik,RB1100AHx4 Dude Edition,ether2,2,backup_uplink,1000,router3
-r3,router3,MikroTik,RB1100AHx4 Dude Edition,ether1,1,WAN,1000,router2
-r3,router3,MikroTik,RB1100AHx4 Dude Edition,ether2,2,transit,1000,core1
