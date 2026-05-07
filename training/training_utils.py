@@ -14,6 +14,7 @@ from src.models.lstm_predictor import (
     LSTMNextWindowPredictor,
     build_lstm_next_window_predictor,
 )
+from src.models.model_io import save_predictor_model
 
 
 DEFAULT_BATCH_SIZE = 32
@@ -72,14 +73,6 @@ def split_lstm_dataset(
 ) -> dict[str, Any]:
     """
     Делит датасет на train / val / test.
-
-    Возвращает словарь с:
-    - train_dataset
-    - val_dataset
-    - test_dataset
-    - train_metadata_df
-    - val_metadata_df
-    - test_metadata_df
     """
     if len(X) == 0:
         raise ValueError("Пустой датасет: невозможно выполнить split.")
@@ -150,7 +143,6 @@ def train_one_epoch(
 ) -> float:
     """
     Один проход обучения.
-    Возвращает средний loss по эпохе.
     """
     model.train()
 
@@ -185,7 +177,6 @@ def validate_one_epoch(
 ) -> float:
     """
     Один проход валидации/оценки.
-    Возвращает средний loss.
     """
     model.eval()
 
@@ -208,45 +199,6 @@ def validate_one_epoch(
     return total_loss / batch_count
 
 
-def save_predictor_model(
-    model: LSTMNextWindowPredictor,
-    output_path: str | Path,
-    extra_metadata: dict[str, Any] | None = None,
-) -> None:
-    """
-    Сохраняет модель и её конфигурацию.
-    """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    payload = {
-        "state_dict": model.state_dict(),
-        "model_config": model.get_model_config(),
-        "extra_metadata": extra_metadata or {},
-    }
-
-    torch.save(payload, output_path)
-
-
-def load_predictor_model(
-    model_path: str | Path,
-    device: str = "cpu",
-) -> LSTMNextWindowPredictor:
-    """
-    Загружает сохранённую модель предиктора.
-    """
-    model_path = Path(model_path)
-    payload = torch.load(model_path, map_location=device)
-
-    model_config = payload["model_config"]
-    model = build_lstm_next_window_predictor(**model_config)
-    model.load_state_dict(payload["state_dict"])
-    model.to(device)
-    model.eval()
-
-    return model
-
-
 def train_lstm_predictor(
     X: np.ndarray,
     y: np.ndarray,
@@ -256,12 +208,6 @@ def train_lstm_predictor(
 ) -> dict[str, Any]:
     """
     Главная функция обучения LSTM-предиктора.
-
-    Возвращает словарь с:
-    - model
-    - history
-    - split_data
-    - dataloaders
     """
     if config is None:
         config = TrainConfig()

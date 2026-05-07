@@ -36,10 +36,103 @@ def _rule(
     }
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """
+    Безопасно приводит значение к float.
+    """
+    if value is None:
+        return default
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    """
+    Безопасно приводит значение к bool.
+    """
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    value_str = str(value).strip().lower()
+    if value_str in {"true", "1", "yes", "up", "available"}:
+        return True
+    if value_str in {"false", "0", "no", "down", "unavailable"}:
+        return False
+
+    return default
+
+
+def _safe_str(value: Any, default: str = "") -> str:
+    """
+    Безопасно приводит значение к строке.
+    """
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _normalize_window_for_baseline(interface_window: dict[str, Any]) -> dict[str, Any]:
+    """
+    Нормализует окно перед применением baseline-правил.
+
+    Здесь мы:
+    - гарантируем наличие ключевых полей;
+    - приводим типы к ожидаемым;
+    - не меняем смысл признаков.
+    """
+    normalized = dict(interface_window)
+
+    # Строковые поля
+    normalized["device_name"] = _safe_str(normalized.get("device_name"), "unknown_device")
+    normalized["interface_name"] = _safe_str(normalized.get("interface_name"), "unknown_interface")
+    normalized["oper_status_last"] = _safe_str(normalized.get("oper_status_last"), "").lower()
+    normalized["admin_status_last"] = _safe_str(normalized.get("admin_status_last"), "").lower()
+
+    # Числовые поля
+    numeric_fields = [
+        "status_change_count",
+        "flap_event_count",
+        "down_seconds_total",
+        "errors_total_delta",
+        "discards_total_delta",
+        "packet_loss_avg_pct",
+        "packet_loss_max_pct",
+        "latency_avg_ms",
+        "latency_max_ms",
+        "utilization_in_avg_pct",
+        "utilization_out_avg_pct",
+        "utilization_peak_pct",
+        "device_cpu_avg_pct",
+        "device_memory_avg_pct",
+    ]
+    for field in numeric_fields:
+        normalized[field] = _safe_float(normalized.get(field), 0.0)
+
+    normalized["device_availability_flag"] = _safe_bool(
+        normalized.get("device_availability_flag"),
+        default=True,
+    )
+
+    # Если флаг burst не передан, вычисляем его из errors_total_delta.
+    if "error_burst_flag" not in normalized or normalized.get("error_burst_flag") is None:
+        normalized["error_burst_flag"] = normalized["errors_total_delta"] >= 50
+    else:
+        normalized["error_burst_flag"] = _safe_bool(normalized.get("error_burst_flag"), default=False)
+
+    return normalized
+
+
 def check_critical_rules(interface_window: dict[str, Any]) -> list[dict[str, str]]:
+    window = _normalize_window_for_baseline(interface_window)
     matched: list[dict[str, str]] = []
 
-    if interface_window.get("device_availability_flag") is False:
+    if window["device_availability_flag"] is False:
         matched.append(
             _rule(
                 "C1_DEVICE_UNAVAILABLE",
@@ -49,10 +142,7 @@ def check_critical_rules(interface_window: dict[str, Any]) -> list[dict[str, str
             )
         )
 
-    if (
-        str(interface_window.get("admin_status_last", "")).lower() == "up"
-        and str(interface_window.get("oper_status_last", "")).lower() == "down"
-    ):
+    if window["admin_status_last"] == "up" and window["oper_status_last"] == "down":
         matched.append(
             _rule(
                 "C2_INTERFACE_DOWN",
@@ -62,10 +152,7 @@ def check_critical_rules(interface_window: dict[str, Any]) -> list[dict[str, str
             )
         )
 
-    if (
-        interface_window.get("status_change_count", 0) >= 3
-        or interface_window.get("flap_event_count", 0) >= 3
-    ):
+    if window["status_change_count"] >= 3 or window["flap_event_count"] >= 3:
         matched.append(
             _rule(
                 "C3_STRONG_FLAPPING",
@@ -75,10 +162,7 @@ def check_critical_rules(interface_window: dict[str, Any]) -> list[dict[str, str
             )
         )
 
-    if (
-        interface_window.get("packet_loss_avg_pct", 0) >= 20
-        or interface_window.get("packet_loss_max_pct", 0) >= 40
-    ):
+    if window["packet_loss_avg_pct"] >= 20 or window["packet_loss_max_pct"] >= 40:
         matched.append(
             _rule(
                 "C4_CRITICAL_PACKET_LOSS",
@@ -88,12 +172,8 @@ def check_critical_rules(interface_window: dict[str, Any]) -> list[dict[str, str
             )
         )
 
-    if (
-        interface_window.get("errors_total_delta", 0) >= 100
-        or (
-            bool(interface_window.get("error_burst_flag", False))
-            and interface_window.get("errors_total_delta", 0) >= 50
-        )
+    if window["errors_total_delta"] >= 100 or (
+        bool(window["error_burst_flag"]) and window["errors_total_delta"] >= 50
     ):
         matched.append(
             _rule(
@@ -108,9 +188,10 @@ def check_critical_rules(interface_window: dict[str, Any]) -> list[dict[str, str
 
 
 def check_degraded_rules(interface_window: dict[str, Any]) -> list[dict[str, str]]:
+    window = _normalize_window_for_baseline(interface_window)
     matched: list[dict[str, str]] = []
 
-    if interface_window.get("status_change_count", 0) in [1, 2]:
+    if window["status_change_count"] in [1, 2]:
         matched.append(
             _rule(
                 "D1_MODERATE_FLAPPING",
@@ -120,10 +201,7 @@ def check_degraded_rules(interface_window: dict[str, Any]) -> list[dict[str, str
             )
         )
 
-    if (
-        interface_window.get("packet_loss_avg_pct", 0) >= 5
-        or interface_window.get("packet_loss_max_pct", 0) >= 10
-    ):
+    if window["packet_loss_avg_pct"] >= 5 or window["packet_loss_max_pct"] >= 10:
         matched.append(
             _rule(
                 "D2_PACKET_LOSS_DEGRADED",
@@ -133,10 +211,7 @@ def check_degraded_rules(interface_window: dict[str, Any]) -> list[dict[str, str
             )
         )
 
-    if (
-        interface_window.get("errors_total_delta", 0) >= 20
-        or interface_window.get("discards_total_delta", 0) >= 20
-    ):
+    if window["errors_total_delta"] >= 20 or window["discards_total_delta"] >= 20:
         matched.append(
             _rule(
                 "D3_ERRORS_DEGRADED",
@@ -146,10 +221,7 @@ def check_degraded_rules(interface_window: dict[str, Any]) -> list[dict[str, str
             )
         )
 
-    if (
-        interface_window.get("latency_avg_ms", 0) >= 50
-        or interface_window.get("latency_max_ms", 0) >= 100
-    ):
+    if window["latency_avg_ms"] >= 50 or window["latency_max_ms"] >= 100:
         matched.append(
             _rule(
                 "D4_HIGH_LATENCY",
@@ -160,9 +232,9 @@ def check_degraded_rules(interface_window: dict[str, Any]) -> list[dict[str, str
         )
 
     if (
-        interface_window.get("utilization_peak_pct", 0) >= 90
-        or interface_window.get("utilization_in_avg_pct", 0) >= 80
-        or interface_window.get("utilization_out_avg_pct", 0) >= 80
+        window["utilization_peak_pct"] >= 90
+        or window["utilization_in_avg_pct"] >= 80
+        or window["utilization_out_avg_pct"] >= 80
     ):
         matched.append(
             _rule(
@@ -177,10 +249,10 @@ def check_degraded_rules(interface_window: dict[str, Any]) -> list[dict[str, str
 
 
 def check_warning_rules(interface_window: dict[str, Any]) -> list[dict[str, str]]:
+    window = _normalize_window_for_baseline(interface_window)
     matched: list[dict[str, str]] = []
 
-    packet_loss_avg_pct = interface_window.get("packet_loss_avg_pct", 0)
-    if 0 < packet_loss_avg_pct < 5:
+    if 0 < window["packet_loss_avg_pct"] < 5:
         matched.append(
             _rule(
                 "W1_LIGHT_PACKET_LOSS",
@@ -190,9 +262,7 @@ def check_warning_rules(interface_window: dict[str, Any]) -> list[dict[str, str]
             )
         )
 
-    errors_total_delta = interface_window.get("errors_total_delta", 0)
-    discards_total_delta = interface_window.get("discards_total_delta", 0)
-    if (0 < errors_total_delta < 20) or (0 < discards_total_delta < 20):
+    if (0 < window["errors_total_delta"] < 20) or (0 < window["discards_total_delta"] < 20):
         matched.append(
             _rule(
                 "W2_LIGHT_ERRORS",
@@ -202,8 +272,7 @@ def check_warning_rules(interface_window: dict[str, Any]) -> list[dict[str, str]
             )
         )
 
-    utilization_peak_pct = interface_window.get("utilization_peak_pct", 0)
-    if 75 <= utilization_peak_pct < 90:
+    if 75 <= window["utilization_peak_pct"] < 90:
         matched.append(
             _rule(
                 "W3_ELEVATED_UTILIZATION",
@@ -213,7 +282,7 @@ def check_warning_rules(interface_window: dict[str, Any]) -> list[dict[str, str]
             )
         )
 
-    if interface_window.get("device_cpu_avg_pct", 0) >= 75:
+    if window["device_cpu_avg_pct"] >= 75:
         matched.append(
             _rule(
                 "W4_DEVICE_CPU_WARNING",
@@ -227,7 +296,9 @@ def check_warning_rules(interface_window: dict[str, Any]) -> list[dict[str, str]
 
 
 def select_state_label(matched_rules: list[dict[str, str]]) -> str:
-    """Выбирает итоговый класс состояния."""
+    """
+    Выбирает итоговый класс состояния.
+    """
     if not matched_rules:
         return "normal"
 
@@ -236,7 +307,9 @@ def select_state_label(matched_rules: list[dict[str, str]]) -> str:
 
 
 def select_problem_type(matched_rules: list[dict[str, str]]) -> str:
-    """Выбирает итоговый тип проблемы по приоритету."""
+    """
+    Выбирает итоговый тип проблемы по приоритету.
+    """
     if not matched_rules:
         return "none"
 
@@ -253,9 +326,13 @@ def build_comment_template(
     interface_window: dict[str, Any],
     matched_rule_ids: list[str] | None = None,
 ) -> str:
-    """Строит человеко-понятный комментарий."""
-    interface_name = interface_window.get("interface_name", "unknown_interface")
-    device_name = interface_window.get("device_name", "unknown_device")
+    """
+    Строит понятный комментарий без генеративной логики.
+    """
+    window = _normalize_window_for_baseline(interface_window)
+
+    interface_name = window.get("interface_name", "unknown_interface")
+    device_name = window.get("device_name", "unknown_device")
 
     if problem_type_label == "down":
         return (
@@ -313,9 +390,11 @@ def evaluate_interface_window(interface_window: dict[str, Any]) -> dict[str, Any
     """
     Главная функция baseline-оценки одного interface_window.
     """
-    critical_rules = check_critical_rules(interface_window)
-    degraded_rules = check_degraded_rules(interface_window) if not critical_rules else []
-    warning_rules = check_warning_rules(interface_window) if not critical_rules and not degraded_rules else []
+    window = _normalize_window_for_baseline(interface_window)
+
+    critical_rules = check_critical_rules(window)
+    degraded_rules = check_degraded_rules(window) if not critical_rules else []
+    warning_rules = check_warning_rules(window) if not critical_rules and not degraded_rules else []
 
     matched_rules = critical_rules + degraded_rules + warning_rules
 
@@ -326,12 +405,12 @@ def evaluate_interface_window(interface_window: dict[str, Any]) -> dict[str, Any
     comment_template = build_comment_template(
         state_label=state_label,
         problem_type_label=problem_type_label,
-        interface_window=interface_window,
+        interface_window=window,
         matched_rule_ids=matched_rule_ids,
     )
 
     return {
-        "record_id": interface_window.get("record_id"),
+        "record_id": window.get("record_id"),
         "state_label": state_label,
         "problem_type_label": problem_type_label,
         "comment_template": comment_template,
@@ -340,7 +419,9 @@ def evaluate_interface_window(interface_window: dict[str, Any]) -> dict[str, Any
 
 
 def evaluate_interface_windows_dataset(windows_df_or_list) -> list[dict[str, Any]]:
-    """Применяет baseline к набору interface_window."""
+    """
+    Применяет baseline к набору interface_window.
+    """
     if hasattr(windows_df_or_list, "to_dict"):
         windows = windows_df_or_list.to_dict(orient="records")
     else:

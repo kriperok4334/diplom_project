@@ -8,28 +8,31 @@ import pandas as pd
 from src.data.loaders import load_all_input_tables
 from src.data.source_adapters import adapt_generic_telemetry_to_normalized
 from src.features.interface_features import build_interface_windows_dataset
-from src.features.sequence_features import DEFAULT_HISTORY_LENGTH, get_predictor_feature_columns
-from src.inference.realtime_pipeline import run_realtime_cycle
-from src.models.model_io import load_predictor_model
+from src.features.sequence_features import (
+    DEFAULT_HISTORY_LENGTH,
+    build_lstm_dataset,
+    get_predictor_feature_columns,
+)
+from training.training_utils import TrainConfig, train_lstm_predictor
 
 
 METRICS_PATH = Path("data/raw/interface_metrics.csv")
 EVENTS_PATH = Path("data/raw/interface_events.csv")
 CONTEXT_PATH = Path("data/raw/device_context.csv")
 
-MODEL_PATH = Path("artifacts/lstm_next_window_predictor.pt")
+MODEL_OUTPUT_PATH = Path("artifacts/lstm_next_window_predictor.pt")
 WINDOW_SIZE_MINUTES = 5
 
 
-def normalize_project_input(
+
+def normalize_training_input(
     metrics_path: str | Path | None,
     events_path: str | Path | None,
     context_path: str | Path | None,
 ):
     """
-    Рабочая точка нормализации входной телеметрии.
-
-    При необходимости здесь можно подменить adapter без изменения loaders.py.
+    Подготовительный вход обучения.
+    Обучение находится вне рабочего проекта и может использовать свой adapter.
     """
     return load_all_input_tables(
         metrics_path=metrics_path,
@@ -39,7 +42,7 @@ def normalize_project_input(
             metrics_df=metrics_df,
             events_df=events_df,
             context_df=context_df,
-            source_name="project_input",
+            source_name="training_input",
         ),
     )
 
@@ -47,7 +50,7 @@ def normalize_project_input(
 
 def get_available_targets(normalized_metrics_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Возвращает все доступные уникальные пары device_id + interface_name.
+    Возвращает все доступные пары device_id + interface_name.
     """
     required_cols = {"device_id", "interface_name"}
     missing = required_cols - set(normalized_metrics_df.columns)
@@ -74,7 +77,7 @@ def build_windows_spec_for_target(
     window_size_minutes: int,
 ) -> list[dict[str, Any]]:
     """
-    Строит окна анализа для одной пары device_id + interface_name.
+    Строит список окон анализа для одного объекта.
     """
     interface_df = normalized_metrics_df.loc[
         (normalized_metrics_df["device_id"].astype("string") == str(device_id))
@@ -124,7 +127,7 @@ def build_windows_spec_for_all_targets(
     window_size_minutes: int,
 ) -> list[dict[str, Any]]:
     """
-    Строит окна анализа для всех интерфейсов.
+    Строит список окон для всех доступных объектов.
     """
     targets_df = get_available_targets(normalized_metrics_df)
 
@@ -146,53 +149,40 @@ def build_windows_spec_for_all_targets(
 
 
 
-def print_realtime_result(result: dict[str, Any]) -> None:
+def print_training_summary(
+    windows_df: pd.DataFrame,
+    X,
+    y,
+    metadata_df: pd.DataFrame,
+) -> None:
     """
-    Печатает один результат realtime-цикла.
+    Печатает краткую сводку по датасету обучения.
     """
-    print("\n=== REALTIME RESULT ===")
-    print(f"Device: {result.get('device_name')}")
-    print(f"Interface: {result.get('interface_name')}")
-    print(
-        f"Current window: {result.get('current_window_start')} -> "
-        f"{result.get('current_window_end')}"
-    )
-    print(f"Current state: {result.get('current_state_label')}")
-    print(f"Current problem: {result.get('current_problem_type_label')}")
-    print(f"Current comment: {result.get('current_comment')}")
+    unique_targets = windows_df[["device_id", "interface_name"]].drop_duplicates().shape[0]
 
-    if result.get("predicted_next_window_start") is not None:
-        print(
-            f"Predicted next window: {result.get('predicted_next_window_start')} -> "
-            f"{result.get('predicted_next_window_end')}"
-        )
-        print(f"Predicted next state: {result.get('predicted_next_state_label')}")
-        print(f"Predicted next problem: {result.get('predicted_next_problem_type_label')}")
-        print(f"Predicted next comment: {result.get('predicted_next_comment')}")
-    else:
-        print("Predicted next window: insufficient history")
-
-    print(f"History length used: {result.get('history_length_used')}")
+    print("=== TRAINING DATA SUMMARY ===")
+    print(f"Targets available: {unique_targets}")
+    print(f"Windows available: {len(windows_df)}")
+    print(f"LSTM samples built: {len(X)}")
+    print(f"X shape: {X.shape}")
+    print(f"y shape: {y.shape}")
+    print(f"Metadata rows: {len(metadata_df)}")
 
 
 
 def main() -> None:
     """
-    Точка входа готового проекта.
-
-    Алгоритм:
+    Подготовительный training pipeline:
     1. Загружаем и нормализуем телеметрию.
     2. Строим interface_window dataset.
-    3. Загружаем готовую обученную LSTM-модель.
-    4. Запускаем inference/realtime цикл.
-    """
-    if not MODEL_PATH.exists():
-        print("Файл обученной модели не найден:")
-        print(MODEL_PATH)
-        print("Сначала нужно отдельно обучить предиктор.")
-        return
+    3. Строим последовательности для LSTM.
+    4. Обучаем модель.
+    5. Сохраняем модель в artifacts/.
 
-    normalized_metrics_df, normalized_events_df, normalized_context_df = normalize_project_input(
+    Этот файл относится к отдельному контуру подготовки инструмента,
+    а не к рабочему проекту напрямую.
+    """
+    normalized_metrics_df, normalized_events_df, normalized_context_df = normalize_training_input(
         metrics_path=METRICS_PATH,
         events_path=EVENTS_PATH,
         context_path=CONTEXT_PATH,
@@ -204,7 +194,7 @@ def main() -> None:
     )
 
     if not windows_spec:
-        print("Не удалось сформировать окна анализа. Проверь входные данные.")
+        print("Не удалось сформировать окна анализа для обучения.")
         return
 
     windows_df = build_interface_windows_dataset(
@@ -215,42 +205,50 @@ def main() -> None:
     )
 
     if windows_df.empty:
-        print("Не удалось собрать interface_window dataset.")
+        print("Не удалось собрать interface_window dataset для обучения.")
         return
 
-    predictor_model = load_predictor_model(
-        model_path=MODEL_PATH,
+    feature_columns = get_predictor_feature_columns()
+
+    X, y, metadata_df = build_lstm_dataset(
+        interface_windows_df=windows_df,
+        feature_columns=feature_columns,
+        history_length=DEFAULT_HISTORY_LENGTH,
+    )
+
+    if len(X) == 0:
+        print("Не удалось построить LSTM-датасет: недостаточно окон или есть пропуски.")
+        return
+
+    print_training_summary(
+        windows_df=windows_df,
+        X=X,
+        y=y,
+        metadata_df=metadata_df,
+    )
+
+    train_config = TrainConfig(
+        batch_size=16,
+        num_epochs=10,
+        learning_rate=1e-3,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        random_seed=42,
         device="cpu",
     )
 
-    feature_columns = get_predictor_feature_columns()
-    history_store: dict[tuple[str, str], list[dict[str, Any]]] = {}
-
-    windows_records = (
-        windows_df.sort_values(["device_id", "interface_name", "window_start"])
-        .to_dict(orient="records")
+    train_result = train_lstm_predictor(
+        X=X,
+        y=y,
+        metadata_df=metadata_df,
+        config=train_config,
+        model_output_path=MODEL_OUTPUT_PATH,
     )
 
-    print("=== PROJECT RUN START ===")
-    print(f"Windows prepared: {len(windows_records)}")
-    print(f"History length required: {DEFAULT_HISTORY_LENGTH}")
-
-    max_demo_cycles = min(len(windows_records), 12)
-
-    for i in range(max_demo_cycles):
-        current_window = windows_records[i]
-
-        realtime_result = run_realtime_cycle(
-            current_window=current_window,
-            history_store=history_store,
-            predictor_model=predictor_model,
-            feature_columns=feature_columns,
-            history_length=DEFAULT_HISTORY_LENGTH,
-            prediction_model_version="predictor_v1",
-            device="cpu",
-        )
-
-        print_realtime_result(realtime_result)
+    print("\n=== TRAINING FINISHED ===")
+    print(f"Best val loss: {train_result['history'].get('best_val_loss')}")
+    print(f"Test loss: {train_result['history'].get('test_loss')}")
+    print(f"Model saved to: {MODEL_OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
