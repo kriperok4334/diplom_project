@@ -497,7 +497,10 @@ def build_interface_windows_dataset(
     """
     rows: list[dict[str, Any]] = []
 
-    for spec in windows_spec:
+    total = len(windows_spec)
+    print(f"Building interface windows: total={total}")
+
+    for idx, spec in enumerate(windows_spec, start=1):
         row = build_interface_window(
             metrics_df=metrics_df,
             events_df=events_df,
@@ -508,5 +511,8 @@ def build_interface_windows_dataset(
             window_end=pd.Timestamp(spec["window_end"]),
         )
         rows.append(row)
+
+        if idx % 100 == 0 or idx == total:
+            print(f"  interface windows progress: {idx}/{total}")
 
     return pd.DataFrame(rows)

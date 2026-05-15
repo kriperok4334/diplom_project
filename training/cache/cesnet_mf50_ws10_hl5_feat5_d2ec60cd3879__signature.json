@@ -1,0 +1,17 @@
+{
+  "pipeline_version": "v1",
+  "max_files": 50,
+  "window_size_minutes": 10,
+  "history_length": 5,
+  "feature_columns": [
+    "latency_avg_ms",
+    "latency_max_ms",
+    "utilization_in_avg_pct",
+    "utilization_out_avg_pct",
+    "utilization_peak_pct"
+  ],
+  "extra_params": {
+    "dataset_name": "cesnet_timeseries24",
+    "artifact_name": "lstm_next_window_predictor"
+  }
+}

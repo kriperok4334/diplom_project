@@ -10,11 +10,16 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, random_split
 
-from src.models.lstm_predictor import (
+from training.lstm_predictor import (
     LSTMNextWindowPredictor,
     build_lstm_next_window_predictor,
 )
-from src.models.model_io import save_predictor_model
+from training.model_io import save_predictor_model
+from training.scalers import (
+    fit_sequence_scalers,
+    transform_X,
+    transform_y,
+)
 
 
 DEFAULT_BATCH_SIZE = 32
@@ -61,6 +66,28 @@ class TrainConfig:
     test_ratio: float = DEFAULT_TEST_RATIO
     random_seed: int = DEFAULT_RANDOM_SEED
     device: str = "cpu"
+
+
+def extract_arrays_from_subset(
+    subset: Dataset,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Извлекает X и y из torch Subset/ Dataset в numpy-массивы.
+    """
+    if not hasattr(subset, "indices") or not hasattr(subset, "dataset"):
+        raise ValueError("Ожидался torch.utils.data.Subset с полями indices и dataset.")
+
+    base_dataset = subset.dataset
+
+    if not hasattr(base_dataset, "X") or not hasattr(base_dataset, "y"):
+        raise ValueError("Базовый dataset должен содержать поля X и y.")
+
+    indices = subset.indices
+
+    X = base_dataset.X[indices].detach().cpu().numpy().astype(np.float32)
+    y = base_dataset.y[indices].detach().cpu().numpy().astype(np.float32)
+
+    return X, y
 
 
 def split_lstm_dataset(
@@ -118,6 +145,40 @@ def split_lstm_dataset(
     }
 
 
+def prepare_normalized_split_datasets(
+    split_data: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Берёт split_data, считает scaler только по train
+    и возвращает новые нормализованные train/val/test datasets.
+    """
+    X_train, y_train = extract_arrays_from_subset(split_data["train_dataset"])
+    X_val, y_val = extract_arrays_from_subset(split_data["val_dataset"])
+    X_test, y_test = extract_arrays_from_subset(split_data["test_dataset"])
+
+    x_scaler, y_scaler = fit_sequence_scalers(X_train, y_train)
+
+    X_train_scaled = transform_X(X_train, x_scaler)
+    y_train_scaled = transform_y(y_train, y_scaler)
+
+    X_val_scaled = transform_X(X_val, x_scaler)
+    y_val_scaled = transform_y(y_val, y_scaler)
+
+    X_test_scaled = transform_X(X_test, x_scaler)
+    y_test_scaled = transform_y(y_test, y_scaler)
+
+    return {
+        "x_scaler": x_scaler,
+        "y_scaler": y_scaler,
+        "train_dataset": WindowSequenceDataset(X_train_scaled, y_train_scaled),
+        "val_dataset": WindowSequenceDataset(X_val_scaled, y_val_scaled),
+        "test_dataset": WindowSequenceDataset(X_test_scaled, y_test_scaled),
+        "train_arrays": (X_train_scaled, y_train_scaled),
+        "val_arrays": (X_val_scaled, y_val_scaled),
+        "test_arrays": (X_test_scaled, y_test_scaled),
+    }
+
+
 def create_dataloaders(
     train_dataset: Dataset,
     val_dataset: Dataset,
@@ -157,6 +218,7 @@ def train_one_epoch(
         y_pred = model(X_batch)
         loss = criterion(y_pred, y_batch)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         total_loss += float(loss.item())
@@ -205,10 +267,9 @@ def train_lstm_predictor(
     metadata_df: pd.DataFrame,
     config: TrainConfig | None = None,
     model_output_path: str | Path | None = None,
+    feature_columns: list[str] | None = None,
+    history_length: int | None = None,
 ) -> dict[str, Any]:
-    """
-    Главная функция обучения LSTM-предиктора.
-    """
     if config is None:
         config = TrainConfig()
 
@@ -221,18 +282,25 @@ def train_lstm_predictor(
         random_seed=config.random_seed,
     )
 
+    normalized_split = prepare_normalized_split_datasets(split_data)
+
     dataloaders = create_dataloaders(
-        train_dataset=split_data["train_dataset"],
-        val_dataset=split_data["val_dataset"],
-        test_dataset=split_data["test_dataset"],
+        train_dataset=normalized_split["train_dataset"],
+        val_dataset=normalized_split["val_dataset"],
+        test_dataset=normalized_split["test_dataset"],
         batch_size=config.batch_size,
     )
 
-    model = build_lstm_next_window_predictor()
+    feature_count = X.shape[-1]
+
+    model = build_lstm_next_window_predictor(
+        input_size=feature_count,
+        output_size=feature_count,
+    )
     model.to(config.device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-    criterion = nn.MSELoss()
+    criterion = nn.SmoothL1Loss()
 
     history = {
         "train_loss": [],
@@ -296,6 +364,10 @@ def train_lstm_predictor(
             extra_metadata={
                 "history": history,
                 "train_config": config.__dict__,
+                "x_scaler": normalized_split["x_scaler"].to_dict(),
+                "y_scaler": normalized_split["y_scaler"].to_dict(),
+                "feature_columns": feature_columns,
+                "history_length": history_length,
             },
         )
 
@@ -303,5 +375,10 @@ def train_lstm_predictor(
         "model": model,
         "history": history,
         "split_data": split_data,
+        "normalized_split": normalized_split,
         "dataloaders": dataloaders,
+        "x_scaler": normalized_split["x_scaler"],
+        "y_scaler": normalized_split["y_scaler"],
+        "feature_columns": feature_columns,
+        "history_length": history_length,
     }

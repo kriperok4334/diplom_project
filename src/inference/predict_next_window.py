@@ -10,7 +10,7 @@ from src.features.sequence_features import (
     DEFAULT_HISTORY_LENGTH,
     get_predictor_feature_columns,
 )
-from src.models.lstm_predictor import LSTMNextWindowPredictor
+from training.scalers import inverse_transform_y, transform_X
 
 
 def validate_history_for_inference(
@@ -20,12 +20,6 @@ def validate_history_for_inference(
 ) -> None:
     """
     Проверяет, что история окон подходит для инференса.
-
-    Требования:
-    - не пустая таблица
-    - есть обязательные колонки
-    - не меньше history_length окон
-    - нет NaN в нужных признаках в последних history_length окнах
     """
     required_columns = {
         "device_id",
@@ -60,22 +54,14 @@ def validate_history_for_inference(
         )
 
 
-def prepare_sequence_for_inference(
+def prepare_sequence_array_for_inference(
     history_df: pd.DataFrame,
-    feature_columns: list[str] | None = None,
-    history_length: int = DEFAULT_HISTORY_LENGTH,
-    device: str = "cpu",
-) -> tuple[torch.Tensor, pd.DataFrame]:
+    feature_columns: list[str],
+    history_length: int,
+) -> tuple[np.ndarray, pd.DataFrame]:
     """
-    Готовит последние history_length окон одного интерфейса для инференса.
-
-    Возвращает:
-    - input_tensor формы [1, history_length, feature_count]
-    - latest_history_df: последние history_length окон в отсортированном виде
+    Готовит последние history_length окон для инференса.
     """
-    if feature_columns is None:
-        feature_columns = get_predictor_feature_columns()
-
     work_df = history_df.copy()
     work_df["window_start"] = pd.to_datetime(work_df["window_start"], errors="coerce")
     work_df["window_end"] = pd.to_datetime(work_df["window_end"], errors="coerce")
@@ -91,45 +77,59 @@ def prepare_sequence_for_inference(
     latest_history_df = work_df.tail(history_length).copy()
 
     x_array = latest_history_df[feature_columns].to_numpy(dtype=np.float32)
-    x_array = np.expand_dims(x_array, axis=0)  # [1, history_length, feature_count]
+    x_array = np.expand_dims(x_array, axis=0)
 
-    input_tensor = torch.tensor(x_array, dtype=torch.float32, device=device)
-    return input_tensor, latest_history_df
+    return x_array, latest_history_df
+
+
+def normalize_input_sequence(
+    x_array: np.ndarray,
+    x_scaler,
+) -> np.ndarray:
+    """
+    Нормализует входную последовательность.
+    """
+    if x_scaler is None:
+        return x_array.astype(np.float32)
+
+    return transform_X(x_array, x_scaler)
 
 
 @torch.no_grad()
 def predict_next_window_features(
-    model: LSTMNextWindowPredictor,
-    input_sequence: torch.Tensor,
+    predictor_bundle: dict[str, Any],
+    input_sequence: np.ndarray,
     device: str = "cpu",
 ) -> np.ndarray:
     """
-    Прогоняет последовательность через LSTM и возвращает прогнозный вектор окна.
-
-    Ожидаемый input_sequence.shape:
-    [1, history_length, feature_count]
-
-    Возвращает:
-    np.ndarray формы [feature_count]
+    Прогоняет последовательность через модель и возвращает
+    денормализованный прогнозный вектор окна.
     """
+    model = predictor_bundle["model"]
+    y_scaler = predictor_bundle.get("y_scaler")
+
     model = model.to(device)
     model.eval()
 
-    input_sequence = input_sequence.to(device)
-    y_pred = model(input_sequence)
+    input_tensor = torch.tensor(input_sequence, dtype=torch.float32, device=device)
+    y_pred = model(input_tensor)
 
     if y_pred.ndim != 2 or y_pred.shape[0] != 1:
         raise ValueError(
             f"Ожидался выход формы [1, feature_count], получено {tuple(y_pred.shape)}"
         )
 
-    return y_pred[0].detach().cpu().numpy().astype(np.float32)
+    y_pred_np = y_pred.detach().cpu().numpy().astype(np.float32)
+
+    if y_scaler is not None:
+        y_pred_np = inverse_transform_y(y_pred_np, y_scaler)
+
+    return y_pred_np[0]
 
 
 def _clamp_predicted_value(feature_name: str, value: float) -> float:
     """
-    Ограничивает явно невозможные отрицательные значения для признаков,
-    которые по смыслу не должны быть отрицательными.
+    Ограничивает явно невозможные отрицательные значения.
     """
     non_negative_features = {
         "status_change_count",
@@ -179,21 +179,11 @@ def _postprocess_predicted_vector(
 def build_predicted_next_window(
     latest_history_df: pd.DataFrame,
     predicted_vector: np.ndarray,
-    feature_columns: list[str] | None = None,
+    feature_columns: list[str],
 ) -> dict[str, Any]:
     """
-    Собирает объект predicted_next_window из:
-    - последних history_length окон
-    - вектора, предсказанного LSTM
-
-    В объекте сохраняются:
-    - контекст интерфейса
-    - временные границы следующего окна
-    - прогнозируемые признаки окна
+    Собирает объект predicted_next_window.
     """
-    if feature_columns is None:
-        feature_columns = get_predictor_feature_columns()
-
     if latest_history_df.empty:
         raise ValueError("latest_history_df пустой, predicted_next_window собрать нельзя.")
 
@@ -230,32 +220,37 @@ def build_predicted_next_window(
 
 
 def predict_next_window_from_history(
-    model: LSTMNextWindowPredictor,
+    predictor_bundle: dict[str, Any],
     history_df: pd.DataFrame,
-    feature_columns: list[str] | None = None,
-    history_length: int = DEFAULT_HISTORY_LENGTH,
     device: str = "cpu",
 ) -> dict[str, Any]:
     """
-    Полный inference-проход:
-    1. Берёт историю последних окон.
-    2. Готовит вход для модели.
-    3. Получает прогнозный вектор.
-    4. Собирает predicted_next_window.
+    Полный inference-проход через bundle.
     """
+    feature_columns = predictor_bundle.get("feature_columns")
+    history_length = predictor_bundle.get("history_length")
+    x_scaler = predictor_bundle.get("x_scaler")
+
     if feature_columns is None:
         feature_columns = get_predictor_feature_columns()
 
-    input_tensor, latest_history_df = prepare_sequence_for_inference(
+    if history_length is None:
+        history_length = DEFAULT_HISTORY_LENGTH
+
+    x_array, latest_history_df = prepare_sequence_array_for_inference(
         history_df=history_df,
         feature_columns=feature_columns,
         history_length=history_length,
-        device=device,
+    )
+
+    x_array = normalize_input_sequence(
+        x_array=x_array,
+        x_scaler=x_scaler,
     )
 
     predicted_vector = predict_next_window_features(
-        model=model,
-        input_sequence=input_tensor,
+        predictor_bundle=predictor_bundle,
+        input_sequence=x_array,
         device=device,
     )
 

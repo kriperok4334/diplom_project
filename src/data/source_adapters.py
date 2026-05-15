@@ -5,27 +5,20 @@ from typing import Any
 import pandas as pd
 
 from src.data.telemetry_schema import (
+    get_core_metric_names,
     get_normalized_context_required_columns,
     get_normalized_events_required_columns,
     get_normalized_metrics_required_columns,
-    get_core_metric_names,
 )
 
 
 def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Приводит имена колонок к нижнему регистру и удаляет лишние пробелы.
-    """
     result = df.copy()
     result.columns = [str(col).strip().lower() for col in result.columns]
     return result
 
 
 def _ensure_columns(df: pd.DataFrame, required_columns: list[str]) -> pd.DataFrame:
-    """
-    Гарантирует наличие всех обязательных колонок.
-    Отсутствующие колонки создаются и заполняются pd.NA.
-    """
     result = df.copy()
     for col in required_columns:
         if col not in result.columns:
@@ -34,9 +27,6 @@ def _ensure_columns(df: pd.DataFrame, required_columns: list[str]) -> pd.DataFra
 
 
 def _normalize_status_value(value: Any) -> Any:
-    """
-    Унификация статусов интерфейса/устройства.
-    """
     if pd.isna(value):
         return pd.NA
 
@@ -57,9 +47,6 @@ def _normalize_status_value(value: Any) -> Any:
 
 
 def _normalize_severity(value: Any) -> Any:
-    """
-    Унификация severity событий.
-    """
     if pd.isna(value):
         return pd.NA
 
@@ -80,9 +67,6 @@ def _normalize_severity(value: Any) -> Any:
 
 
 def _normalize_event_status(value: Any) -> Any:
-    """
-    Унификация статуса события.
-    """
     if pd.isna(value):
         return pd.NA
 
@@ -102,9 +86,6 @@ def _normalize_event_status(value: Any) -> Any:
 
 
 def _finalize_normalized_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Финальная обработка normalized_metrics_df.
-    """
     required_columns = get_normalized_metrics_required_columns()
 
     result = _standardize_columns(df)
@@ -123,17 +104,14 @@ def _finalize_normalized_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
     status_metric_names = {"oper_status", "admin_status", "device_availability"}
 
-    # Сначала храним metric_value как object, чтобы не потерять строковые статусы.
     result["metric_value"] = result["metric_value"].astype(object)
 
-    # Для числовых метрик приводим к numeric.
     numeric_mask = ~result["metric_name"].isin(status_metric_names)
     result.loc[numeric_mask, "metric_value"] = pd.to_numeric(
         result.loc[numeric_mask, "metric_value"],
         errors="coerce",
     )
 
-    # Для статусных метрик нормализуем строковое представление.
     result.loc[~numeric_mask, "metric_value"] = (
         result.loc[~numeric_mask, "metric_value"]
         .astype("string")
@@ -151,9 +129,6 @@ def _finalize_normalized_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _finalize_normalized_events(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Финальная обработка normalized_events_df.
-    """
     required_columns = get_normalized_events_required_columns()
 
     result = _standardize_columns(df)
@@ -179,9 +154,6 @@ def _finalize_normalized_events(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _finalize_normalized_context(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Финальная обработка normalized_context_df.
-    """
     required_columns = get_normalized_context_required_columns()
 
     result = _standardize_columns(df)
@@ -206,27 +178,8 @@ def _finalize_normalized_context(df: pd.DataFrame) -> pd.DataFrame:
 
 def adapt_wide_metrics_to_normalized(
     metrics_df: pd.DataFrame,
-    source_name: str = "generic",
+    source_name: str = "tabular_input",
 ) -> pd.DataFrame:
-    """
-    Преобразует широкую таблицу метрик в normalized_metrics_df.
-
-    Ожидается, что во входе могут присутствовать колонки вида:
-    - oper_status
-    - admin_status
-    - in_traffic_bps
-    - out_traffic_bps
-    - in_errors
-    - out_errors
-    - in_discards
-    - out_discards
-    - packet_loss_pct
-    - latency_ms
-    - device_cpu_pct
-    - device_memory_pct
-    - device_availability
-    - device_uptime_sec
-    """
     result = _standardize_columns(metrics_df)
 
     id_columns = [
@@ -238,7 +191,6 @@ def adapt_wide_metrics_to_normalized(
         "interface_name",
         "interface_role",
     ]
-
     available_id_columns = [col for col in id_columns if col in result.columns]
 
     metric_candidates = [col for col in get_core_metric_names() if col in result.columns]
@@ -262,11 +214,8 @@ def adapt_wide_metrics_to_normalized(
 
 def adapt_wide_events_to_normalized(
     events_df: pd.DataFrame,
-    source_name: str = "generic",
+    source_name: str = "tabular_input",
 ) -> pd.DataFrame:
-    """
-    Приводит таблицу событий к normalized_events_df.
-    """
     result = _standardize_columns(events_df)
 
     rename_map = {
@@ -289,11 +238,8 @@ def adapt_wide_events_to_normalized(
 
 def adapt_wide_context_to_normalized(
     context_df: pd.DataFrame,
-    source_name: str = "generic",
+    source_name: str = "tabular_input",
 ) -> pd.DataFrame:
-    """
-    Приводит таблицу контекста к normalized_context_df.
-    """
     result = _standardize_columns(context_df)
 
     rename_map = {
@@ -313,67 +259,12 @@ def adapt_wide_context_to_normalized(
     return _finalize_normalized_context(result)
 
 
-def adapt_zabbix_to_normalized(
+def adapt_tabular_telemetry_to_normalized(
     metrics_df: pd.DataFrame | None = None,
     events_df: pd.DataFrame | None = None,
     context_df: pd.DataFrame | None = None,
+    source_name: str = "tabular_input",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Адаптер под Zabbix-данные.
-    Пока использует generic-wide адаптацию.
-    Позже сюда можно добавить zabbix-specific mapping.
-    """
-    normalized_metrics_df = adapt_wide_metrics_to_normalized(
-        metrics_df if metrics_df is not None else pd.DataFrame(),
-        source_name="zabbix",
-    )
-    normalized_events_df = adapt_wide_events_to_normalized(
-        events_df if events_df is not None else pd.DataFrame(),
-        source_name="zabbix",
-    )
-    normalized_context_df = adapt_wide_context_to_normalized(
-        context_df if context_df is not None else pd.DataFrame(),
-        source_name="zabbix",
-    )
-
-    return normalized_metrics_df, normalized_events_df, normalized_context_df
-
-
-def adapt_noc_to_normalized(
-    metrics_df: pd.DataFrame | None = None,
-    events_df: pd.DataFrame | None = None,
-    context_df: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Адаптер под NOC-данные.
-    Пока использует generic-wide адаптацию.
-    """
-    normalized_metrics_df = adapt_wide_metrics_to_normalized(
-        metrics_df if metrics_df is not None else pd.DataFrame(),
-        source_name="noc",
-    )
-    normalized_events_df = adapt_wide_events_to_normalized(
-        events_df if events_df is not None else pd.DataFrame(),
-        source_name="noc",
-    )
-    normalized_context_df = adapt_wide_context_to_normalized(
-        context_df if context_df is not None else pd.DataFrame(),
-        source_name="noc",
-    )
-
-    return normalized_metrics_df, normalized_events_df, normalized_context_df
-
-
-def adapt_generic_telemetry_to_normalized(
-    metrics_df: pd.DataFrame | None = None,
-    events_df: pd.DataFrame | None = None,
-    context_df: pd.DataFrame | None = None,
-    source_name: str = "generic",
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Универсальный адаптер для произвольной телеметрии,
-    если она уже близка к нашей широкой форме.
-    """
     normalized_metrics_df = adapt_wide_metrics_to_normalized(
         metrics_df if metrics_df is not None else pd.DataFrame(),
         source_name=source_name,

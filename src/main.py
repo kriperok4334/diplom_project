@@ -6,11 +6,10 @@ from typing import Any
 import pandas as pd
 
 from src.data.loaders import load_all_input_tables
-from src.data.source_adapters import adapt_generic_telemetry_to_normalized
+from src.data.source_adapters import adapt_tabular_telemetry_to_normalized
 from src.features.interface_features import build_interface_windows_dataset
-from src.features.sequence_features import DEFAULT_HISTORY_LENGTH, get_predictor_feature_columns
 from src.inference.realtime_pipeline import run_realtime_cycle
-from src.models.model_io import load_predictor_model
+from training.model_io import load_predictor_bundle
 
 
 METRICS_PATH = Path("data/raw/interface_metrics.csv")
@@ -18,31 +17,24 @@ EVENTS_PATH = Path("data/raw/interface_events.csv")
 CONTEXT_PATH = Path("data/raw/device_context.csv")
 
 MODEL_PATH = Path("artifacts/lstm_next_window_predictor.pt")
+
 WINDOW_SIZE_MINUTES = 5
 
 
 def normalize_project_input(
-    metrics_path: str | Path | None,
-    events_path: str | Path | None,
-    context_path: str | Path | None,
-):
+    metrics_df: pd.DataFrame,
+    events_df: pd.DataFrame,
+    context_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Рабочая точка нормализации входной телеметрии.
-
-    При необходимости здесь можно подменить adapter без изменения loaders.py.
+    Нормализация табличной телеметрии рабочего проекта.
     """
-    return load_all_input_tables(
-        metrics_path=metrics_path,
-        events_path=events_path,
-        context_path=context_path,
-        adapter=lambda metrics_df, events_df, context_df: adapt_generic_telemetry_to_normalized(
-            metrics_df=metrics_df,
-            events_df=events_df,
-            context_df=context_df,
-            source_name="project_input",
-        ),
+    return adapt_tabular_telemetry_to_normalized(
+        metrics_df=metrics_df,
+        events_df=events_df,
+        context_df=context_df,
+        source_name="project_runtime_input",
     )
-
 
 
 def get_available_targets(normalized_metrics_df: pd.DataFrame) -> pd.DataFrame:
@@ -64,7 +56,6 @@ def get_available_targets(normalized_metrics_df: pd.DataFrame) -> pd.DataFrame:
         .reset_index(drop=True)
     )
     return targets_df
-
 
 
 def build_windows_spec_for_target(
@@ -118,7 +109,6 @@ def build_windows_spec_for_target(
     return windows_spec
 
 
-
 def build_windows_spec_for_all_targets(
     normalized_metrics_df: pd.DataFrame,
     window_size_minutes: int,
@@ -143,7 +133,6 @@ def build_windows_spec_for_all_targets(
         all_windows_spec.extend(target_windows)
 
     return all_windows_spec
-
 
 
 def print_realtime_result(result: dict[str, Any]) -> None:
@@ -175,16 +164,9 @@ def print_realtime_result(result: dict[str, Any]) -> None:
     print(f"History length used: {result.get('history_length_used')}")
 
 
-
 def main() -> None:
     """
     Точка входа готового проекта.
-
-    Алгоритм:
-    1. Загружаем и нормализуем телеметрию.
-    2. Строим interface_window dataset.
-    3. Загружаем готовую обученную LSTM-модель.
-    4. Запускаем inference/realtime цикл.
     """
     if not MODEL_PATH.exists():
         print("Файл обученной модели не найден:")
@@ -192,10 +174,11 @@ def main() -> None:
         print("Сначала нужно отдельно обучить предиктор.")
         return
 
-    normalized_metrics_df, normalized_events_df, normalized_context_df = normalize_project_input(
+    normalized_metrics_df, normalized_events_df, normalized_context_df = load_all_input_tables(
         metrics_path=METRICS_PATH,
         events_path=EVENTS_PATH,
         context_path=CONTEXT_PATH,
+        adapter=normalize_project_input,
     )
 
     windows_spec = build_windows_spec_for_all_targets(
@@ -218,12 +201,17 @@ def main() -> None:
         print("Не удалось собрать interface_window dataset.")
         return
 
-    predictor_model = load_predictor_model(
+    predictor_bundle = load_predictor_bundle(
         model_path=MODEL_PATH,
         device="cpu",
     )
 
-    feature_columns = get_predictor_feature_columns()
+    print("=== MODEL BUNDLE LOADED ===")
+    print(f"Artifact version: {predictor_bundle.get('artifact_version')}")
+    print(f"History length: {predictor_bundle.get('history_length')}")
+    print(f"Feature columns: {predictor_bundle.get('feature_columns')}")
+    print(f"Model config: {predictor_bundle.get('model_config')}")
+
     history_store: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
     windows_records = (
@@ -233,7 +221,6 @@ def main() -> None:
 
     print("=== PROJECT RUN START ===")
     print(f"Windows prepared: {len(windows_records)}")
-    print(f"History length required: {DEFAULT_HISTORY_LENGTH}")
 
     max_demo_cycles = min(len(windows_records), 12)
 
@@ -243,9 +230,7 @@ def main() -> None:
         realtime_result = run_realtime_cycle(
             current_window=current_window,
             history_store=history_store,
-            predictor_model=predictor_model,
-            feature_columns=feature_columns,
-            history_length=DEFAULT_HISTORY_LENGTH,
+            predictor_bundle=predictor_bundle,
             prediction_model_version="predictor_v1",
             device="cpu",
         )

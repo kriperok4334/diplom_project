@@ -58,11 +58,13 @@ def validate_interface_windows_df(
         raise ValueError("interface_windows_df пустой, последовательности построить нельзя.")
 
 
+
 def _has_missing_values(df: pd.DataFrame, feature_columns: list[str]) -> bool:
     """
     Проверяет, есть ли пропуски в признаках конкретной последовательности.
     """
     return bool(df[feature_columns].isna().any().any())
+
 
 
 def _build_sample_metadata(
@@ -88,6 +90,7 @@ def _build_sample_metadata(
         "target_index_in_group": int(target_row.name),
         "group_window_count": int(len(target_df)),
     }
+
 
 
 def build_sequence_samples_for_target(
@@ -154,6 +157,7 @@ def build_sequence_samples_for_target(
     return x_samples, y_samples, metadata_rows
 
 
+
 def build_lstm_dataset(
     interface_windows_df: pd.DataFrame,
     feature_columns: list[str] | None = None,
@@ -184,9 +188,12 @@ def build_lstm_dataset(
     all_y_samples: list[np.ndarray] = []
     all_metadata_rows: list[dict[str, Any]] = []
 
-    grouped = work_df.groupby(["device_id", "interface_name"], sort=True)
+    grouped_items = list(work_df.groupby(["device_id", "interface_name"], sort=True))
+    total_groups = len(grouped_items)
 
-    for (_, _), group_df in grouped:
+    print(f"Building LSTM dataset: groups={total_groups}")
+
+    for group_idx, ((_, _), group_df) in enumerate(grouped_items, start=1):
         x_samples, y_samples, metadata_rows = build_sequence_samples_for_target(
             target_df=group_df,
             feature_columns=feature_columns,
@@ -196,6 +203,12 @@ def build_lstm_dataset(
         all_x_samples.extend(x_samples)
         all_y_samples.extend(y_samples)
         all_metadata_rows.extend(metadata_rows)
+
+        if group_idx % 10 == 0 or group_idx == total_groups:
+            print(
+                f"  sequence groups progress: {group_idx}/{total_groups} | "
+                f"samples so far: {len(all_x_samples)}"
+            )
 
     feature_count = len(feature_columns)
 
